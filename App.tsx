@@ -24,6 +24,7 @@ type HandSource = 'both' | 'left' | 'right';
 type CameraPreset = 'wide' | 'balanced' | 'close';
 type MimicStyle = 'skeleton' | 'ghost' | 'ribbon';
 type DetectionMode = 'auto' | 'manual';
+type InteractionMode = 'attract' | 'repel' | 'swirl' | 'idle';
 
 interface TrackedHand {
   landmarks: HandLandmark[];
@@ -145,6 +146,11 @@ const App: React.FC = () => {
   const activeShapeRef = useRef<ShapePreset>('sphere');
   const techniqueGateRef = useRef({ candidate: 'neutral' as Technique, frames: 0, lastSwitchAt: 0 });
   const shapeGateRef = useRef({ candidate: 'sphere' as ShapePreset, frames: 0, lastSwitchAt: 0 });
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioMasterRef = useRef<GainNode | null>(null);
+  const soundEnabledRef = useRef(true);
+  const soundVolumeRef = useRef(0.22);
+  const lastInteractionModeRef = useRef<InteractionMode>('idle');
 
   const [started, setStarted] = useState(false);
   const [overlayError, setOverlayError] = useState('');
@@ -186,6 +192,8 @@ const App: React.FC = () => {
   const [stabilityScore, setStabilityScore] = useState(0);
   const [interactionState, setInteractionState] = useState('Idle');
   const [slashes, setSlashes] = useState<SlashFx[]>([]);
+  const [soundEnabled, setSoundEnabled] = useState(true);
+  const [soundVolume, setSoundVolume] = useState(0.22);
 
   const modeLabel = useMemo(() => {
     if (mode === 'jjk') return TECHNIQUE_LABELS[activeTechnique];
@@ -209,6 +217,117 @@ const App: React.FC = () => {
       'Hand Mimic: particles copy your hand lines; use both hands for mirrored patterns.'
     ],
     []
+  );
+
+  const ensureAudio = useCallback((): AudioContext | null => {
+    if (typeof window === 'undefined') return null;
+    if (!audioContextRef.current) {
+      const AudioCtor = (window.AudioContext ?? (window as any).webkitAudioContext) as typeof AudioContext | undefined;
+      if (!AudioCtor) return null;
+      const context = new AudioCtor();
+      const masterGain = context.createGain();
+      masterGain.gain.value = soundEnabledRef.current ? soundVolumeRef.current : 0;
+      masterGain.connect(context.destination);
+      audioContextRef.current = context;
+      audioMasterRef.current = masterGain;
+    }
+    if (audioContextRef.current.state === 'suspended') {
+      void audioContextRef.current.resume();
+    }
+    return audioContextRef.current;
+  }, []);
+
+  const playTone = useCallback(
+    (
+      frequency: number,
+      duration = 0.12,
+      wave: OscillatorType = 'sine',
+      amplitude = 0.08,
+      glideTo?: number
+    ) => {
+      if (!soundEnabledRef.current) return;
+      const context = ensureAudio();
+      const masterGain = audioMasterRef.current;
+      if (!context || !masterGain) return;
+
+      const now = context.currentTime;
+      const oscillator = context.createOscillator();
+      const toneGain = context.createGain();
+      oscillator.type = wave;
+      oscillator.frequency.setValueAtTime(frequency, now);
+      if (glideTo) {
+        oscillator.frequency.exponentialRampToValueAtTime(Math.max(20, glideTo), now + duration);
+      }
+
+      toneGain.gain.setValueAtTime(0.0001, now);
+      toneGain.gain.exponentialRampToValueAtTime(Math.max(0.001, amplitude), now + 0.012);
+      toneGain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+
+      oscillator.connect(toneGain);
+      toneGain.connect(masterGain);
+      oscillator.start(now);
+      oscillator.stop(now + duration + 0.03);
+    },
+    [ensureAudio]
+  );
+
+  const playTechniqueCue = useCallback(
+    (technique: Technique) => {
+      const baseByTechnique: Record<Technique, number> = {
+        neutral: 196,
+        red: 175,
+        void: 262,
+        purple: 311,
+        shrine: 147,
+        dismantle: 130,
+        nova: 220,
+        lotus: 247,
+        storm: 294
+      };
+      const base = baseByTechnique[technique];
+      playTone(base, 0.13, 'triangle', 0.08, base * 1.2);
+      if (technique !== 'neutral') {
+        window.setTimeout(() => playTone(base * 1.5, 0.08, 'sine', 0.05), 65);
+      }
+    },
+    [playTone]
+  );
+
+  const playShapeCue = useCallback(
+    (shape: ShapePreset) => {
+      const baseByShape: Record<ShapePreset, number> = {
+        sphere: 196,
+        cube: 185,
+        torus: 220,
+        heart: 247,
+        dna: 262,
+        galaxy: 294,
+        spiral: 330,
+        crystal: 349,
+        flower: 392,
+        wave: 174
+      };
+      const base = baseByShape[shape];
+      playTone(base, 0.11, 'sine', 0.065, base * 1.06);
+    },
+    [playTone]
+  );
+
+  const playInteractionCue = useCallback(
+    (modeName: InteractionMode) => {
+      if (modeName === 'attract') {
+        playTone(188, 0.08, 'sine', 0.038, 236);
+        return;
+      }
+      if (modeName === 'repel') {
+        playTone(172, 0.07, 'square', 0.032, 134);
+        return;
+      }
+      if (modeName === 'swirl') {
+        playTone(262, 0.09, 'triangle', 0.034, 330);
+      }
+    },
+    [playTone]
   );
 
   const pickHands = useCallback((source: HandSource) => {
@@ -356,6 +475,16 @@ const App: React.FC = () => {
   ]);
 
   useEffect(() => {
+    soundEnabledRef.current = soundEnabled;
+    soundVolumeRef.current = soundVolume;
+    const context = audioContextRef.current;
+    const masterGain = audioMasterRef.current;
+    if (context && masterGain) {
+      masterGain.gain.setTargetAtTime(soundEnabled ? soundVolume : 0, context.currentTime, 0.02);
+    }
+  }, [soundEnabled, soundVolume]);
+
+  useEffect(() => {
     if (!hostRef.current) return undefined;
     const host = hostRef.current;
 
@@ -454,17 +583,20 @@ const App: React.FC = () => {
 
   const startExperience = useCallback(async () => {
     setOverlayError('');
+    ensureAudio();
     try {
       setCameraStatus('Loading hand tracker...');
       await VisionService.getInstance().initialize();
       setStarted(true);
+      playTone(220, 0.08, 'triangle', 0.07, 330);
+      window.setTimeout(() => playTone(330, 0.1, 'sine', 0.06, 392), 90);
     } catch (error) {
       console.error('Initialization failed:', error);
       setOverlayError('Could not initialize vision model. Check internet and reload.');
       setCameraStatus('Initialization failed');
       setStarted(false);
     }
-  }, []);
+  }, [ensureAudio, playTone]);
 
   useEffect(() => {
     if (!started) return undefined;
@@ -651,6 +783,7 @@ const App: React.FC = () => {
           technique = candidate;
           techniqueGateRef.current.lastSwitchAt = timeMs;
           setActiveTechnique(candidate);
+          playTechniqueCue(candidate);
           if (candidate === 'dismantle') spawnSlash(4);
         } else {
           technique = activeTechniqueRef.current;
@@ -684,6 +817,7 @@ const App: React.FC = () => {
           shape = candidate;
           shapeGateRef.current.lastSwitchAt = timeMs;
           setActiveShape(candidate);
+          playShapeCue(candidate);
         } else {
           shape = activeShapeRef.current;
         }
@@ -790,7 +924,7 @@ const App: React.FC = () => {
         buffers.colors[idx + 2] = cb;
       }
 
-      let interactionMode: 'attract' | 'repel' | 'swirl' | 'idle' = 'idle';
+      let interactionMode: InteractionMode = 'idle';
       let interactionX = 0;
       let interactionY = 0;
       let interactionZ = 0;
@@ -819,6 +953,13 @@ const App: React.FC = () => {
       } else {
         interactionRef.current = 'Idle';
         camera.position.z = lerp(camera.position.z, 42, 0.04);
+      }
+
+      if (interactionMode !== lastInteractionModeRef.current) {
+        lastInteractionModeRef.current = interactionMode;
+        if (interactionMode !== 'idle') {
+          playInteractionCue(interactionMode);
+        }
       }
 
       const radiusSq = settings.interactionRadius * settings.interactionRadius;
@@ -907,9 +1048,19 @@ const App: React.FC = () => {
       cancelled = true;
       if (renderRafRef.current) cancelAnimationFrame(renderRafRef.current);
     };
-  }, [pickHands, spawnSlash, started]);
+  }, [pickHands, playInteractionCue, playShapeCue, playTechniqueCue, spawnSlash, started]);
 
   useEffect(() => () => stopCameraStream(), [stopCameraStream]);
+
+  useEffect(
+    () => () => {
+      const context = audioContextRef.current;
+      if (context && context.state !== 'closed') {
+        void context.close();
+      }
+    },
+    []
+  );
 
   return (
     <div className={`jjk-app ${theme === 'ember' ? '' : `theme-${theme}`}`.trim()}>
@@ -1021,6 +1172,7 @@ const App: React.FC = () => {
                 if (techniqueMode === 'manual') {
                   activeTechniqueRef.current = tech;
                   setActiveTechnique(tech);
+                  playTechniqueCue(tech);
                 }
               }}
             >
@@ -1048,6 +1200,7 @@ const App: React.FC = () => {
                 if (shapeMode === 'manual') {
                   activeShapeRef.current = shapeOption;
                   setActiveShape(shapeOption);
+                  playShapeCue(shapeOption);
                 }
               }}
             >
@@ -1089,6 +1242,31 @@ const App: React.FC = () => {
         <label className="toggle">
           <input type="checkbox" checked={autoRotate} onChange={(e) => setAutoRotate(e.target.checked)} />
           Auto rotate
+        </label>
+
+        <p className="section-title">Sound</p>
+        <label className="toggle">
+          <input
+            type="checkbox"
+            checked={soundEnabled}
+            onChange={(e) => {
+              const next = e.target.checked;
+              setSoundEnabled(next);
+              if (next) ensureAudio();
+            }}
+          />
+          Enable effects
+        </label>
+        <label className="range-group">
+          Volume: {Math.round(soundVolume * 100)}%
+          <input
+            type="range"
+            min={0}
+            max={1}
+            step={0.01}
+            value={soundVolume}
+            onChange={(e) => setSoundVolume(Number(e.target.value))}
+          />
         </label>
 
         <p className="section-title">Dynamics</p>
